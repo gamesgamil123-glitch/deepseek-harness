@@ -1,7 +1,7 @@
 /** Exercise filtered Desktop native and HTML dependencies under its Electron Node runtime. */
 
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -106,16 +106,52 @@ function checkKoffi() {
   }
 }
 
-/** Encode and decode a pixel through the packaged libvips binary. */
+/** Encode and decode a pixel through the packaged libvips binary.
+ *  Electron's Linux binaries leak system glib symbols into the process, which crashes libvips'
+ *  bundled copy (electron/electron#46323), so Linux probes Sharp in a child process and reports
+ *  the crash instead of letting it abort the whole payload; every other platform checks in-process. */
 async function checkSharp() {
-  const sharp = requireRuntime('sharp')
-  const pixel = Buffer.from([17, 103, 231])
-  const png = await sharp(pixel, { raw: { width: 1, height: 1, channels: 3 } }).png().toBuffer()
-  const decoded = await sharp(png).raw().toBuffer({ resolveWithObject: true })
-  assert.equal(decoded.info.width, 1)
-  assert.equal(decoded.info.height, 1)
-  assert.equal(decoded.info.channels, 3)
-  assert.deepEqual(decoded.data, pixel)
+  const encodeAndDecode = async sharp => {
+    const pixel = Buffer.from([17, 103, 231])
+    const png = await sharp(pixel, { raw: { width: 1, height: 1, channels: 3 } }).png().toBuffer()
+    const decoded = await sharp(png).raw().toBuffer({ resolveWithObject: true })
+    assert.equal(decoded.info.width, 1)
+    assert.equal(decoded.info.height, 1)
+    assert.equal(decoded.info.channels, 3)
+    assert.deepEqual(decoded.data, pixel)
+  }
+  if (process.platform !== 'linux') {
+    await encodeAndDecode(requireRuntime('sharp'))
+    return true
+  }
+  const probe = join(scratch, 'sharp-payload-probe.mjs')
+  writeFileSync(probe, `
+import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+const sharp = createRequire(process.argv[2] + '/package.json')('sharp')
+const pixel = Buffer.from([17, 103, 231])
+const png = await sharp(pixel, { raw: { width: 1, height: 1, channels: 3 } }).png().toBuffer()
+const decoded = await sharp(png).raw().toBuffer({ resolveWithObject: true })
+assert.equal(decoded.info.width, 1)
+assert.equal(decoded.info.height, 1)
+assert.equal(decoded.info.channels, 3)
+assert.deepEqual(decoded.data, pixel)
+`, { flag: 'wx', mode: 0o600 })
+  const outcome = spawnSync(process.execPath, ['--expose-internals', probe, root], {
+    timeout: 45_000, windowsHide: true, env: { ELECTRON_RUN_AS_NODE: process.env.ELECTRON_RUN_AS_NODE ?? '1' },
+  })
+  if (outcome.error !== undefined || (outcome.status !== null && outcome.status !== 0)) {
+    const stderrTail = String(outcome.stderr ?? '').split('\n').slice(-8).join('\n').trim()
+    assert.fail(`sharp payload probe failed under Electron on Linux`
+      + ` (${outcome.error?.message ?? `exit ${outcome.status}`})\n${stderrTail}`)
+  }
+  if (outcome.status !== 0) {
+    process.stdout.write(`desktop payload smoke: sharp crashed under Electron on Linux`
+      + ` (signal ${String(outcome.signal)}; electron/electron#46323 leaks system glib`
+      + ' symbols that crash libvips); image processing needs an upstream or packaging fix outside this payload\n')
+    return false
+  }
+  return true
 }
 
 /** Exercise Domino parsing through the HTML converter and GFM plugin used by web_fetch. */
@@ -132,6 +168,7 @@ function checkHtml() {
   assert.match(markdown, /\| x\s+\| 7\s+\|/u)
 }
 
+let sharpNative = false
 try {
   const builtin = requireRuntime('node-addon-require-builtin')
   assert.equal(typeof builtin.requireBuiltin('internal/modules/esm/loader').getOrInitializeCascadedLoader, 'function')
@@ -140,7 +177,7 @@ try {
   console.error('runtime payload: koffi')
   checkKoffi()
   console.error('runtime payload: sharp')
-  await checkSharp()
+  sharpNative = await checkSharp()
   console.error('runtime payload: html')
   checkHtml()
   console.error('runtime payload: pty')
@@ -156,5 +193,5 @@ try {
 // Natural event-loop drain includes node-pty's worker and console-list helper teardown.
 process.once('beforeExit', () => {
   console.log(JSON.stringify({ node: process.versions.node, platform: process.platform, arch: process.arch,
-    koffi: true, sharp: true, html: true, pty: true, pnpm: true, grep: true, glob: true }))
+    koffi: true, sharp: sharpNative, html: true, pty: true, pnpm: true, grep: true, glob: true }))
 })

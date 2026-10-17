@@ -16,11 +16,15 @@ import { validateDesktopBuildVersion } from './desktop-build-version.mjs'
 
 const APP_ROOT = resolve(import.meta.dirname, '..')
 const REPOSITORY_ROOT = resolve(APP_ROOT, '..', '..')
+
+/** Linux publishes no update feed, so uploads only accept the update targets. */
+export type DesktopUploadTargetName = Exclude<DesktopPackageTargetName, 'linux-x64'>
+
 const TARGETS = {
   'mac-arm64': { platform: 'darwin', arch: 'arm64', os: 'mac' },
   'mac-x64': { platform: 'darwin', arch: 'x64', os: 'mac' },
   'win-x64': { platform: 'win32', arch: 'x64', os: 'win' },
-} as const satisfies Record<DesktopPackageTargetName, {
+} as const satisfies Record<DesktopUploadTargetName, {
   readonly platform: NodeJS.Platform
   readonly arch: string
   readonly os: string
@@ -40,7 +44,7 @@ export interface DesktopUploadArtifact {
 /** A validated installer or update upload, with any channel metadata ordered last. */
 export interface DesktopUploadPlan {
   readonly environment: 'test' | 'production'
-  readonly target: DesktopPackageTargetName
+  readonly target: DesktopUploadTargetName
   readonly version: string
   /** Update feed directory URL, or the single installer URL for a fixed download. */
   readonly publicUrl: string
@@ -178,7 +182,7 @@ function uploadArtifact(
  * @returns A fixed installer upload or an update plan with channel metadata ordered last.
  */
 export async function createDesktopUploadPlan(
-  targetName: DesktopPackageTargetName,
+  targetName: DesktopUploadTargetName,
   options: DesktopUploadPlanOptions = {},
 ): Promise<DesktopUploadPlan> {
   const target = TARGETS[targetName]

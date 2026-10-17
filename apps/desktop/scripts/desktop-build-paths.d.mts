@@ -1,4 +1,5 @@
-import type { DesktopAutoUpdateTarget } from './desktop-auto-update-environment.mjs'
+/** Directory name of one supported Desktop build target. */
+export type DesktopBuildTargetName = 'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'
 
 /** Mutable target directories plus the shared immutable download cache. */
 export interface DesktopTargetBuildPaths {
@@ -28,14 +29,14 @@ export function resolveDesktopBuildTarget(
   env?: NodeJS.ProcessEnv,
   hostPlatform?: NodeJS.Platform,
   hostArch?: string,
-): DesktopAutoUpdateTarget
+): DesktopBuildTargetName
 
 /**
  * Return the mutable preparation and artifact directories owned by one release target.
  * @param target - Supported Desktop target name.
  * @returns Target paths plus the shared immutable download cache.
  */
-export function desktopTargetBuildPaths(target: DesktopAutoUpdateTarget): DesktopTargetBuildPaths
+export function desktopTargetBuildPaths(target: DesktopBuildTargetName): DesktopTargetBuildPaths
 
 /**
  * Return the platform and architecture of the payload one release target prepares.
@@ -43,8 +44,8 @@ export function desktopTargetBuildPaths(target: DesktopAutoUpdateTarget): Deskto
  * @param target - Supported Desktop target name.
  * @returns Platform and architecture of the prepared payload.
  */
-export function desktopTargetPlatform(target: DesktopAutoUpdateTarget): {
-  readonly platform: 'darwin' | 'win32'
+export function desktopTargetPlatform(target: DesktopBuildTargetName): {
+  readonly platform: 'darwin' | 'win32' | 'linux'
   readonly arch: 'arm64' | 'x64'
 }
 

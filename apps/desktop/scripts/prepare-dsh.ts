@@ -43,7 +43,9 @@ const STORE_ROOT = join(BUILD_ROOT, 'store')
 const RUNTIME_ROOT = BUILD_PATHS.runtime
 const PNPM_BUILD_STATE = BUILD_PATHS.dshPnpm
 const PACKAGE_SET_ROOT = BUILD_PATHS.packageSet
-const NODE = join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
+const NODE_PLATFORM = desktopTargetPlatform(resolveDesktopBuildTarget()).platform
+const NODE = join(BUILD_PATHS.electron, NODE_PLATFORM === 'win32' ? 'electron.exe'
+  : NODE_PLATFORM === 'darwin' ? 'Electron.app/Contents/MacOS/Electron' : 'electron')
 const PNPM = join(RUNTIME_ROOT, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
 
 function manifestVersion(path: string, subject: string): string {
@@ -66,6 +68,26 @@ function desktopRelease(): DesktopRelease {
     nodeVersion: runtime.node,
     pnpmVersion: runtime.pnpm,
   })
+}
+
+/**
+ * Repair the vendored LibreOfficeKit installed-package probe for Electron's asar filesystem.
+ * Electron's asar-aware lstatSync reports missing archive entries as null instead of undefined,
+ * which the vendored probe reads as a partially installed native engine and aborts instead of
+ * falling back to the wasm engine that Linux publishes; the kit repository owns the real fix.
+ * @param outputRoot Materialized runtime tree carrying the vendored kit.
+ */
+function patchLibreOfficeKitInstalledPackageProbe(outputRoot: string): void {
+  const vendoredProbe = 'lstatSync(join(directory, name), { throwIfNoEntry: false }) !== void 0'
+  const electronSafeProbe = 'lstatSync(join(directory, name), { throwIfNoEntry: false }) != null'
+  for (const file of ['lib/index.js', 'lib/cli.js']) {
+    const path = join(outputRoot, 'node_modules', '@deepseek-ai', 'libreoffice-kit', file)
+    const source = readFileSync(path, 'utf8')
+    if (!source.includes(vendoredProbe)) {
+      throw new Error(`desktop runtime: libreoffice-kit ${file} does not match the expected installed-package probe`)
+    }
+    writeFileSync(path, source.replaceAll(vendoredProbe, electronSafeProbe))
+  }
 }
 
 function runPnpm(args: readonly string[]): Promise<void> {
@@ -134,7 +156,7 @@ async function main(): Promise<void> {
     await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:install', () => runPnpm(['install', '--prod', '--frozen-lockfile', '--trust-lockfile']))
     const packageSet = readDesktopCorePackageSet(BUILD_ROOT, release.version)
     const targetName = resolveDesktopBuildTarget()
-    const target = { platform: process.platform, arch: desktopTargetPlatform(targetName).arch }
+    const target = desktopTargetPlatform(targetName)
     const modules = join(BUILD_ROOT, 'node_modules')
     const officeManifest = JSON.parse(readFileSync(join(modules, '@deepseek-ai/libreoffice-kit/package.json'), 'utf8'))
     const officeEngine = selectOfficeEngine(officeManifest, target)
@@ -145,6 +167,10 @@ async function main(): Promise<void> {
         filter: source => desktopRuntimeFileExclusion(relative(modules, source), target, officeEngine) === undefined,
       })
     })
+    if (target.platform === 'linux') {
+      await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:patch-office-probe',
+        async () => patchLibreOfficeKitInstalledPackageProbe(DSH_OUTPUT_ROOT))
+    }
     writeFileSync(join(DSH_OUTPUT_ROOT, 'package.json'), `${JSON.stringify({
       name: '@deepseek-ai/dsh-desktop-runtime', private: true, version: release.version, type: 'module',
       dependencies: Object.fromEntries(packageSet.packages.map(entry => [entry.name, entry.version])),

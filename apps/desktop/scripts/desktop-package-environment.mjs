@@ -14,6 +14,9 @@ import { resolveWindowsSignatureCacheDirectory } from './windows-signature-cache
 import { resolveWindowsPackageSettings } from './windows-package-settings.mjs'
 
 const APP_ROOT = fileURLToPath(new URL('..', import.meta.url))
+// The application identity every platform template configures; Linux publishes without signing,
+// an update feed, or a policy deployment, so an absent Linux dotenv falls back to it.
+const LINUX_DEFAULT_APP_ID = 'com.deepseek.harness'
 const SHARED_SETTING = /^(?:DSH_DESKTOP_(?:APP_ID|AUTO_UPDATE_ENV|NPM_REGISTRY|MANDATORY_UPDATE_(?:CONFIG|(?:TEST|PROD)_ORIGIN))|DOWNLOAD_TEST_RELEASE_ID|DOWNLOAD_(?:TEST|PROD)_(?:ORIGIN|COS_BUCKET|COS_SECRET_ID|COS_SECRET_KEY))$/u
 const WINDOWS_SETTING = /^DSH_DESKTOP_WINDOWS_(?:CER_FILE|SIGNTOOL|KEY_CONTAINER|TOKEN_PIN|SIGNATURE_CACHE_DIR|SIGNATURE_CACHE_CONCURRENCY)$/u
 const MACOS_SETTING = /^(?:DSH_DESKTOP_MACOS_(?:SIGNING_IDENTITY|TEAM_ID|SIGNATURE_CACHE_DIR|PACK_CONCURRENCY|DOWNLOAD_PROXY|NOTARIZATION_PROXY)|APPLE_(?:API_KEY|API_KEY_ID|API_ISSUER|ID|APP_SPECIFIC_PASSWORD|TEAM_ID|KEYCHAIN|KEYCHAIN_PROFILE)|CSC_(?:LINK|KEY_PASSWORD))$/u
@@ -21,7 +24,7 @@ const AMBIENT_RELEASE_SETTING = /^(?:DSH_DESKTOP_(?:APP_ID|AUTO_UPDATE_ENV|MANDA
 const FILE_SETTINGS = ['DSH_DESKTOP_WINDOWS_CER_FILE', 'DSH_DESKTOP_WINDOWS_SIGNTOOL', 'APPLE_API_KEY', 'APPLE_KEYCHAIN', 'CSC_LINK']
 
 /**
- * Select local macOS test defaults without reading dotenv files or inheriting release settings.
+ * Select local test defaults without reading dotenv files or inheriting release settings.
  * @param {NodeJS.ProcessEnv} environment Parent environment, retained for build tools and networking.
  * @returns {NodeJS.ProcessEnv} Unsigned build environment with the standard application identifier and no update policy.
  */
@@ -34,9 +37,23 @@ export function localMacOSPackageEnvironment(environment = process.env) {
 }
 
 /**
+ * Local Linux defaults for a machine without `.env.linux`; Linux publishes without signing, an
+ * update feed, or a mandatory-update deployment, so ambient release settings never apply.
+ * @param {NodeJS.ProcessEnv} environment Parent environment, retained for build tools and networking.
+ * @returns {NodeJS.ProcessEnv} Unsigned build environment with the standard application identifier and no update policy.
+ */
+function localLinuxPackageEnvironment(environment) {
+  return {
+    ...Object.fromEntries(Object.entries(environment).filter(([name]) => !AMBIENT_RELEASE_SETTING.test(name))),
+    DSH_DESKTOP_APP_ID: LINUX_DEFAULT_APP_ID,
+    DSH_DESKTOP_UNSIGNED: '1',
+  }
+}
+
+/**
  * Read a machine preset when selected, otherwise the target's required dotenv; no ambient release fallback.
  * PACKAGE_TEST_RELEASE_ID overrides the test preset only; blank retains its configured ID.
- * @param {'win32' | 'darwin'} platform Target platform.
+ * @param {'win32' | 'darwin' | 'linux'} platform Target platform.
  * @param {NodeJS.ProcessEnv} environment Parent environment, retained only for unrelated build tools.
  * @param {string} appRoot Desktop application directory; relative credential paths resolve here.
  * @param {{ unsigned?: boolean, prepareOnly?: boolean }} options Unsigned presets and Windows preparation-only presets never read signing credentials.
@@ -44,20 +61,22 @@ export function localMacOSPackageEnvironment(environment = process.env) {
  */
 export function loadDesktopPackageEnvironment(platform, environment = process.env, appRoot = APP_ROOT, options = {}) {
   const preset = environment.DSH_PACKAGING_PRESET
-  let path = join(appRoot, platform === 'win32' ? '.env.windows' : '.env.macos')
+  let path = join(appRoot, platform === 'win32' ? '.env.windows' : platform === 'darwin' ? '.env.macos' : '.env.linux')
   if (preset !== undefined) {
     if (preset !== 'test' && preset !== 'production') throw new Error('desktop package: preset must be test or production')
+    if (platform === 'linux') throw new Error('desktop package: presets require a Windows or macOS target')
     const root = environment.DSH_PACKAGING_CONFIG_DIR
     if (!root || !isAbsolute(root)) throw new Error('desktop package: DSH_PACKAGING_CONFIG_DIR must be an absolute directory')
     path = join(root, 'presets', `${preset}.env`)
   }
-  const platformSetting = platform === 'win32' ? WINDOWS_SETTING : MACOS_SETTING
+  const platformSetting = platform === 'win32' ? WINDOWS_SETTING : platform === 'darwin' ? MACOS_SETTING : undefined
   const publicPlatformSetting = platform === 'win32'
     ? /^DSH_DESKTOP_WINDOWS_SIGNATURE_CACHE_(?:DIR|CONCURRENCY)$/u
     : /^DSH_DESKTOP_MACOS_(?:SIGNATURE_CACHE_DIR|PACK_CONCURRENCY|DOWNLOAD_PROXY|NOTARIZATION_PROXY)$/u
   const settings = readSettings(path, name => preset === undefined
-    ? SHARED_SETTING.test(name) || platformSetting.test(name)
-    : /^(?:DSH_DESKTOP_(?:APP_ID|AUTO_UPDATE_ENV|NPM_REGISTRY|MANDATORY_UPDATE_(?:CONFIG|(?:TEST|PROD)_ORIGIN))|DOWNLOAD_TEST_(?:ORIGIN|RELEASE_ID))$/u.test(name) || publicPlatformSetting.test(name))
+    ? SHARED_SETTING.test(name) || platformSetting?.test(name) === true
+    : /^(?:DSH_DESKTOP_(?:APP_ID|AUTO_UPDATE_ENV|NPM_REGISTRY|MANDATORY_UPDATE_(?:CONFIG|(?:TEST|PROD)_ORIGIN))|DOWNLOAD_TEST_(?:ORIGIN|RELEASE_ID))$/u.test(name) || publicPlatformSetting.test(name),
+  platform === 'linux' ? () => localLinuxPackageEnvironment(environment) : undefined)
   if (preset !== undefined) {
     if (settings.DSH_DESKTOP_AUTO_UPDATE_ENV !== preset) throw new Error('desktop package: preset deployment must match its name')
     if (!options.unsigned && (platform === 'darwin' || !options.prepareOnly)) {
@@ -86,14 +105,16 @@ export function loadDesktopPackageEnvironment(platform, environment = process.en
  * Read an explicitly selected dotenv without exposing credential-bearing parser errors.
  * @param {string} path Selected file; relative file settings resolve beside it.
  * @param {(name: string) => boolean} accepts Whether this file may declare a setting.
+ * @param {() => NodeJS.ProcessEnv} absent Settings to use when the file does not exist; absent files otherwise fail.
  * @returns {NodeJS.ProcessEnv} Validated file settings.
  */
-function readSettings(path, accepts) {
+function readSettings(path, accepts, absent = undefined) {
   let contents
   try {
     contents = readFileSync(path, 'utf8')
   }
   catch {
+    if (absent !== undefined) return absent()
     throw new Error(`desktop package: cannot read ${path}; copy ${path}.example and fill in the local settings`)
   }
   let settings
@@ -128,18 +149,22 @@ function requireReadableFile(environment, name) {
 
 /**
  * Validate the packaging mode before preparation without invoking a token or Apple's services.
+ * Linux publishes without signing, an update feed, or a mandatory-update deployment, so only the
+ * shared identity settings are required there.
  * @param {NodeJS.ProcessEnv} environment Selected local defaults or file-owned release settings.
- * @param {{ platform: 'win32' | 'darwin', arch: string }} target Selected release target.
+ * @param {{ platform: 'win32' | 'darwin' | 'linux', arch: string }} target Selected release target.
  * @param {{ unsigned?: boolean, prepareOnly?: boolean, skipNotarization?: boolean }} options Explicit packaging mode.
  * @returns {void}
  */
 export function validateDesktopPackageEnvironment(environment, target, options = {}) {
   resolveDesktopAppId(environment)
   resolveNpmRegistry(environment)
-  if (target.platform !== 'darwin' || !options.unsigned) resolveDesktopPolicyEnvironment(environment)
+  if (target.platform === 'linux') {
+    // Linux packages never embed an update policy, so an inherited one is not evidence of misconfiguration.
+  } else if (target.platform !== 'darwin' || !options.unsigned) resolveDesktopPolicyEnvironment(environment)
   if (target.platform === 'darwin') resolveMacOSPackageSettings(environment)
-  else resolveWindowsPackageSettings(environment)
-  if (options.unsigned) return
+  else if (target.platform === 'win32') resolveWindowsPackageSettings(environment)
+  if (target.platform === 'linux' || options.unsigned) return
   if (!options.prepareOnly) resolveDesktopAutoUpdateConfig(environment, target.platform, target.arch)
   if (target.platform === 'win32') {
     if (!options.prepareOnly) createWindowsTokenSigner({

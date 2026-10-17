@@ -2,7 +2,12 @@
 import { appendFile, readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { desktopTargetBuildPaths, resolveDesktopBuildTarget } from './desktop-build-paths.mjs'
-import { desktopBuildRecordFilename, desktopUpdateMetadataFilename, resolveDesktopUpdateChannel } from './desktop-auto-update-environment.mjs'
+import {
+  desktopBuildRecordFilename,
+  desktopUpdateMetadataFilename,
+  resolveDesktopUpdateChannel,
+  type DesktopAutoUpdateTarget,
+} from './desktop-auto-update-environment.mjs'
 import { loadDesktopPackageEnvironment } from './desktop-package-environment.mjs'
 import { retainDesktopRelease, type DesktopRetainedSource } from './desktop-release-store.ts'
 import { validateDesktopBuildVersion } from './desktop-build-version.mjs'
@@ -33,7 +38,10 @@ export function desktopReleasesRoot(env: NodeJS.ProcessEnv): string {
  * @returns Retained directory, including explicitly qualified debugging packages.
  */
 export async function retainDesktopCi(env: NodeJS.ProcessEnv, appRoot = resolve(import.meta.dirname, '..')): Promise<string> {
-  const target = resolveDesktopBuildTarget(env)
+  const buildTarget = resolveDesktopBuildTarget(env)
+  // Retention serves the macOS and Windows publication workflows; Linux has no update feed to publish.
+  if (buildTarget === 'linux-x64') throw new Error('desktop retention: linux-x64 publishes no updatable package')
+  const target: DesktopAutoUpdateTarget = buildTarget
   const windows = target === 'win-x64'
   const platform = windows ? 'win32' : 'darwin'
   const settings = loadDesktopPackageEnvironment(platform, env, appRoot, { unsigned: true })
