@@ -2,7 +2,7 @@
 
 import { packagingStep } from './packaging-step.mjs'
 import { spawn } from 'node:child_process'
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, join, relative, resolve } from 'node:path'
 import { desktopNodeEnvironment } from '../src/node-environment.ts'
@@ -137,6 +137,25 @@ async function main(): Promise<void> {
     const modules = join(BUILD_ROOT, 'node_modules')
     const officeManifest = JSON.parse(readFileSync(join(modules, '@deepseek-ai/libreoffice-kit/package.json'), 'utf8'))
     const officeEngine = selectOfficeEngine(officeManifest, target)
+    // local/mac11-electron37: the published darwin-x64 prebuilt requires macOS 15
+    // and only accepts Electron 43+ runtime fingerprints; overwrite it with the
+    // locally rebuilt min-11.0 binary before materialization and its smoke checks.
+    await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:macos11-native', async () => {
+      const source = resolve(APP_ROOT, '..', '..', 'patches', 'node-addon-require-builtin-darwin-x64-macos11.node')
+      const relativeBinary = join('node-addon-require-builtin-darwin-x64', 'prebuilt', 'darwin-x64-napi-v9.node')
+      const targets = [join(modules, relativeBinary)]
+      const pnpmDirectory = join(modules, '.pnpm')
+      if (existsSync(pnpmDirectory)) {
+        targets.push(...readdirSync(pnpmDirectory)
+          .filter(name => name.startsWith('node-addon-require-builtin-darwin-x64@'))
+          .map(name => join(pnpmDirectory, name, 'node_modules', relativeBinary)))
+      }
+      const installed = targets.filter(target => existsSync(target))
+      if (installed.length === 0) {
+        throw new Error('desktop runtime: macOS 11 native replacement found no require-builtin platform directory')
+      }
+      for (const target of installed) copyFileSync(source, target)
+    })
     mkdirSync(DSH_OUTPUT_ROOT, { recursive: true })
     await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'runtime:materialize-modules', async () => {
       cpSync(modules, join(DSH_OUTPUT_ROOT, 'node_modules'), {

@@ -18,6 +18,10 @@ overrides:
   'extract-zip>yauzl': '3.4.0'
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'
   '@deepseek-ai/schemastery': 'link:vendor/schemastery'
+  # local/mac11-electron37: esbuild >=0.26 ships darwin-x64 binaries that
+  # require macOS 12; 0.25.12 is the newest Big Sur-compatible release and
+  # its stable JS API covers tsx's and vite's usage.
+  esbuild: 0.25.12
 
 peerDependencyRules:
   allowedVersions:
@@ -29,8 +33,14 @@ peerDependencyRules:
 # default and only allow scripts we need. esbuild (native binary) and lefthook
 # (git hooks) genuinely need theirs.
 allowBuilds:
-  esbuild: true
-  lefthook: true
+  # local/mac11-electron37: their binaries require macOS 12+; the esbuild
+  # binary itself arrives through the @esbuild/<platform> optional packages
+  # and lefthook only installs git hooks, so both scripts stay skipped here.
+  esbuild: false
+  lefthook: false
+  # The locked Electron archive is downloaded by packaging, not by the
+  # dependency's own installer script.
+  electron: false
   # Cross-platform boundary for the persistent PTY backend, including ConPTY on Windows.
   node-pty: true
   # Pulled in by @earendil-works/pi-ai (optional LLM API backend). pnpm lists
@@ -106,6 +116,7 @@ minimumReleaseAgeExclude:
   # Desktop packaging requires this Electron fingerprint with node-addon-require-builtin 0.1.9.
   - electron@44.7.0
 patchedDependencies:
+  '@deepseek-ai/libreoffice-kit@0.1.5': patches/@deepseek-ai__libreoffice-kit@0.1.5.patch
   '@earendil-works/pi-ai@1.0.2': patches/@earendil-works__pi-ai@1.0.2.patch
   '@electron/osx-sign@1.3.3': patches/@electron__osx-sign@1.3.3.patch
   '@fortune-sheet/core@1.0.4': patches/@fortune-sheet__core@1.0.4.patch

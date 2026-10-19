@@ -1,0 +1,39 @@
+diff --git a/lib/index.js b/lib/index.js
+index aac18a01c09916f51a76ceb81e47f75109d8497b..6c0d02f5ca564cfccf45abf46f09f1e749f7a6d1 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1,5 +1,5 @@
+ import { createRequire } from "node:module";
+-import { closeSync, constants, createWriteStream, lstatSync, readSync, readdirSync } from "node:fs";
++import { closeSync, constants, createWriteStream, existsSync, lstatSync, readSync, readdirSync } from "node:fs";
+ import { copyFile, lstat, mkdir, mkdtemp, open, readFile, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+ import { homedir, tmpdir } from "node:os";
+ import { dirname, extname, isAbsolute, join, posix, relative, resolve, sep, win32 } from "node:path";
+@@ -1502,8 +1502,13 @@ function hostReport() {
+ }
+ function asset(root, value) {
+ 	if (typeof value !== "string" || !value || isAbsolute(value)) throw new Error("Engine manifest contains an invalid asset path.");
+-	const path = resolve(root, value);
++	let path = resolve(root, value);
+ 	if (relative(root, path).startsWith(`..${sep}`) || relative(root, path) === "..") throw new Error("Engine asset escapes its installed package.");
++	// Electron 37 exposes asar entries only through archive metadata; native
++	// engine processes need the physical app.asar.unpacked files.
++	if (path.includes(`${sep}app.asar${sep}`) && existsSync(path.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`))) {
++		path = path.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`);
++	}
+ 	return path;
+ }
+ function glibcVersion(value) {
+@@ -1541,7 +1546,11 @@ async function resolveEngine(resolvePackage = (name) => require.resolve(`${name}
+ 	return readEngine(resolvePackage(`${ENGINE_PREFIX}-wasm`), "wasm", "wasm");
+ }
+ async function engineAsset(root, value, name, kind) {
+-	const path = asset(root, value);
++	let path = asset(root, value);
++	if (name === "executable" && path.includes(`${sep}app.asar${sep}`)) {
++		const physical = path.replace(`${sep}app.asar${sep}`, `${sep}app.asar.unpacked${sep}`);
++		if (await stat(physical).catch(() => undefined) !== undefined) path = physical;
++	}
+ 	const status = await stat(path);
+ 	if (kind === "directory" ? !status.isDirectory() : !status.isFile()) throw new Error(`Installed LibreOfficeKit ${name} is not a ${kind}.`);
+ 	if (name === "executable" && process.platform !== "win32" && !(status.mode & 73)) throw new Error("Installed LibreOfficeKit executable is not executable.");
